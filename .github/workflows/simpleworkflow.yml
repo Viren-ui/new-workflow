@@ -1,52 +1,84 @@
-# This is a basic workflow to help you get started with Actions
+name: public-repository-template1
 
-name: simple workflow for github actions
-
-# Controls when the workflow will run
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
+    # trigger only on tags that roughly look like your RCs (glob)
+    tags:
+      - "v*.*.*-rc*"
 
-  # Allows you to run this workflow manually from the Actions tab
-  workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
-  build:
-    # The type of runner that the job will run on
+  validate:
     runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    outputs:
+      tag_ok: ${{ steps.check.outputs.tag_ok }}
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+      - name: Check out (needed to get git in runner)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - name: Validate tag name matches ^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$
+        id: check
+        shell: bash
         run: |
-  deploy:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
+          # extract the tag name from GITHUB_REF (refs/tags/<tag>)
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Tag name: $TAG"
 
-    # Steps represent a sequence of tasks that will be executed as part of the job
-    steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$ ]]; then
+            echo "Tag matches expected pattern"
+            echo "tag_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag does NOT match expected pattern"
+            echo "tag_ok=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, virendra!
+  build-and-push-dockerimages:
+    needs: validate
+    # run only if validation passed AND tag was created from test-cloudy-project branch
+    if: needs.validate.outputs.tag_ok == 'true' && github.event.base_ref == 'refs/heads/test-cloudy-project'
+    uses: Calance-US/calance-workflows/.github/workflows/build.yml@v3.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [public-repository-template1]
+    permissions:
+      contents: read
+      packages: write
+    secrets:
+      IMAGE_REGISTRY_PASSWORD: ${{ secrets.IMAGE_REGISTRY_PASSWORD }}
+    with:
+      image_name: calance-us/${{ matrix.project }}
+      image_registry: ${{ vars.IMAGE_REGISTRY }}
+      image_registry_username: ${{ vars.IMAGE_REGISTRY_USERNAME }}
+      docker_context_path: react-ui/
+      dockerfile_path: react-ui/Dockerfile
 
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
-        run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+  deploy-to-kubernetes:
+    needs: build-and-push-dockerimages
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [public-repository-template1]
+    permissions:
+      contents: read
+      packages: write
+    uses: Calance-US/calance-workflows/.github/workflows/deploy.yml@v3.0.0
+    with:
+      env_specific_namespaces: true
+      repository_name: ${{ github.event.repository.name }}
+      image_name: calance-us/${{ matrix.project }}
+      image_registry: ${{ vars.IMAGE_REGISTRY }}
+      version: ${{ needs.build-and-push-dockerimages.outputs.version }}
+      commit_id: ${{ needs.build-and-push-dockerimages.outputs.commit_id }}
+      release_name: ${{ matrix.project }}
+      cluster_environment: ${{ needs.build-and-push-dockerimages.outputs.cluster_environment }}
+      jenkins_job_name: kubernetes-deploy-on-nutanix
+      workflows_release: v3.0.0
+      helm_values_repository: calance-services-helm-values
+      codeowners_email_ids: VKashyap@calance.com
+    secrets:
+      JENKINS_URL: ${{ secrets.JENKINS_URL }}
+      JENKINS_USER: ${{ secrets.JENKINS_USER }}
+      JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
