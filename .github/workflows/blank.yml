@@ -1,0 +1,84 @@
+name: public-repository-template1
+
+on:
+  push:
+    # trigger only on tags that roughly look like your RCs (glob)
+    tags:
+      - "v*.*.*-rc*"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      tag_ok: ${{ steps.check.outputs.tag_ok }}
+    steps:
+      - name: Check out (needed to get git in runner)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag name matches ^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$
+        id: check
+        shell: bash
+        run: |
+          # extract the tag name from GITHUB_REF (refs/tags/<tag>)
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "Tag name: $TAG"
+
+          if [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+$ ]]; then
+            echo "Tag matches expected pattern"
+            echo "tag_ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Tag does NOT match expected pattern"
+            echo "tag_ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-and-push-dockerimages:
+    needs: validate
+    # run only if validation passed AND tag was created from test-cloudy-project branch
+    if: needs.validate.outputs.tag_ok == 'true' && github.event.base_ref == 'refs/heads/test-cloudy-project'
+    uses: Calance-US/calance-workflows/.github/workflows/build.yml@v3.0.0
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [public-repository-template1]
+    permissions:
+      contents: read
+      packages: write
+    secrets:
+      IMAGE_REGISTRY_PASSWORD: ${{ secrets.IMAGE_REGISTRY_PASSWORD }}
+    with:
+      image_name: calance-us/${{ matrix.project }}
+      image_registry: ${{ vars.IMAGE_REGISTRY }}
+      image_registry_username: ${{ vars.IMAGE_REGISTRY_USERNAME }}
+      docker_context_path: react-ui/
+      dockerfile_path: react-ui/Dockerfile
+
+  deploy-to-kubernetes:
+    needs: build-and-push-dockerimages
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [public-repository-template1]
+    permissions:
+      contents: read
+      packages: write
+    uses: Calance-US/calance-workflows/.github/workflows/deploy.yml@v3.0.0
+    with:
+      env_specific_namespaces: true
+      repository_name: ${{ github.event.repository.name }}
+      image_name: calance-us/${{ matrix.project }}
+      image_registry: ${{ vars.IMAGE_REGISTRY }}
+      version: ${{ needs.build-and-push-dockerimages.outputs.version }}
+      commit_id: ${{ needs.build-and-push-dockerimages.outputs.commit_id }}
+      release_name: ${{ matrix.project }}
+      cluster_environment: ${{ needs.build-and-push-dockerimages.outputs.cluster_environment }}
+      jenkins_job_name: kubernetes-deploy-on-nutanix
+      workflows_release: v3.0.0
+      helm_values_repository: calance-services-helm-values
+      codeowners_email_ids: VKashyap@calance.com
+    secrets:
+      JENKINS_URL: ${{ secrets.JENKINS_URL }}
+      JENKINS_USER: ${{ secrets.JENKINS_USER }}
+      JENKINS_TOKEN: ${{ secrets.JENKINS_TOKEN }}
+      SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
